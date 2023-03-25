@@ -1,0 +1,192 @@
+---
+title: "Running Different GARCH Models"
+author: "Vincent Tandaw"
+date: "`r Sys.Date()`"
+output:
+  prettydoc::html_pretty:
+    theme: architect
+    highlight: github
+    toc: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+# clear-up the environment
+rm(list = ls())
+# chunk options
+knitr::opts_chunk$set(
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  comment = "#>"
+)
+```
+
+## 1. Read Libraries
+
+```{r}
+# Read Libraries
+library(quantmod)
+library(fGarch)
+library(moments)
+library(padr)
+```
+
+## 2. Read the Data
+
+Download DJI data from FRED using getSymbols wrapper
+
+```{r}
+# Read Data
+getSymbols("DJI",from="1991-01-01", to="2019-06-30")
+
+```
+
+## 3. Data Wrangling
+
+Transform data into daily returns and plot the series to see what we are dealing with.
+
+```{r}
+dji_daily = dailyReturn(DJI, subset=NULL, type='arithmetic', leading=TRUE)
+plot(dji_daily)
+```
+
+As shown above, the series exhibits huge spikes around 2008-2010, which could hint at the nonstationarity of the series.
+
+```{r}
+dji_daily = as.numeric(dji_daily)
+dji_daily = na.omit(dji_daily)
+```
+
+We remove NAs and transform data into numeric to build an AR model for the mean equation
+
+## 4. AR Mean Equation
+
+Let's fit an AR model to the series to act as the mean equation for the GARCH model. I will limit the order maximum to 5, and the max-likelihood estimator finds an AR(2) model. Other higher-order models perform only marginally better, according to AIC and BIC, but will not be used due to overfitting concerns
+
+```{r}
+ar.mle(dji_daily ,order.max=5)
+dji_ar2 = arima(dji_daily,order=c(2,0,0))
+```
+
+Predicting four-step-ahead forecasts with their 95% confidence intervals by manually calculating it
+
+```{r}
+
+pred4 <- predict(dji_ar2, n.ahead=4)
+#lowerbound
+for (x in 1:length(pred4$pred)) {
+    print(pred4$pred[x]-1.645*pred4$se[x])}
+#upperbound
+for (x in 1:length(pred4$pred)) {
+    print(pred4$pred[x]+1.645*pred4$se[x])}
+
+```
+
+The final results are:
+
+| Time Ahead | Forecasted Value | Standard Error |       95% Interval       |
+|:-:|:-:|:-:|:-:|
+|     1      |   0.004975517    |   0.05639723   | $$-0.106 < r_{t+1} < 0.116$$|
+|     2      |   0.008500069    |   0.05652933   | $$-0.102 < r_{t+2} < 0.1196$$ |
+|     3      |   0.003891645    |   0.05669128   | $$-0.107 < r_{t+3} < 0.115$$  |
+|     4      |   0.003376332    |   0.05674665   | $$-0.108 < r_{t+4} < 0.115$$  |
+
+## 5. Confirm if GARCH effects are present
+
+We find that though the series is serially uncorrelated, the ACF and PACF of the square of the series and the series in absolute terms exhibit some serial correlation. Thus, the series is serially uncorrelated but weakly dependent.
+
+```{r}
+acf(dji_daily, lag.max=10,main='DJI ACF')
+
+pacf(dji_daily, lag.max=10,main='DJI PACF')
+
+acf(abs(dji_daily), lag.max=10, main='abs(DJI)')
+
+acf(dji_daily^2, lag.max=10,main='DJI^2 ACF')
+
+pacf(dji_daily^2, lag.max=10,main='DJI^2 PACF')
+```
+
+## 6.1 Building the ARMA(2,0)+GARCH(1,1) models
+
+We will employ this specification as it provides the best information criteria, specifically AIC and BIC. We first assume Gaussian innovations for the volatility equations, then employ Student's t innovations. For clarity, fitted model equations are all shown below together.
+
+```{r}
+mod1 = garchFit(~arma(2,0)+garch(1,1),data=dji_daily,trace=F)
+summary(mod1)
+```
+
+Verifying the model's validity requires the use of the Box-Ljung test of the series and the square of the series not to exhibit any serial correlation. The Ljung-Box test for the standardized residuals gives Q(10)=15.97 with p-value of 0.10, while the test for squared standardized residuals gives Q(10)=9.598 with p-value of 0.47. This is a step closer to verifying the model
+
+```{r}
+Box.test(mod1@residuals/mod1@sigma.t,lag=10,type='Ljung')
+Box.test((mod1@residuals/mod1@sigma.t)^2,lag=10,type='Ljung')
+```
+
+We note that the AR lags were nonsignificant, so we cannot be sure that these lags provide meaningful information to the model. Thus, we rerun the model with no ARMA terms i.e. just the volatility equation along with the Q-tests.
+
+```{r}
+mod2 = garchFit(~arma(0,0)+garch(1,1),data=dji_daily,trace=F)
+summary(mod2)
+
+Box.test(mod2@residuals/mod2@sigma.t,lag=10,type='Ljung')
+Box.test((mod2@residuals/mod2@sigma.t)^2,lag=10,type='Ljung')
+```
+
+THis time, all the variables are significant to the 0.1% level. The Q-statistic for the standardized shocks is 15.151 with p-value of 0.1266, while the squared standardized shocks give Q(10)=10.112 with p-value of 0.43
+
+### 6.2 GARCH with Student's t Innovations
+
+Just for completeness, we rerun the same specification under a different assumption. As a result, the fitted model does change, albeit slightly.
+
+```{r}
+mod3 = garchFit(~arma(2,0)+garch(1,1),data=dji_daily,trace=F,cond.dist=c("std"))
+summary(mod3)
+
+Box.test(mod3@residuals/mod3@sigma.t,lag=10,type='Ljung')
+Box.test((mod3@residuals/mod3@sigma.t)^2,lag=10,type='Ljung')
+```
+
+This time, the first AR lag is significant at the 5% level.
+
+And, the Ljung-Box test for the standardized residuals gives Q(10)=19.713 with p-value of 0.03, which indicates that the model may not be adequate. Meanwhile, the test for squared standardized residuals gives Q(10)=10.553 with p-value of 0.39.
+
+Therefore, we rerun the model as an ARMA(1,0) + GARCH(1,1):
+
+```{r}
+mod4 = garchFit(~arma(1,0)+garch(1,1),data=dji_daily,trace=F,cond.dist=c("std"))
+summary(mod4)
+
+Box.test(mod4@residuals/mod4@sigma.t,lag=10,type='Ljung')
+Box.test((mod4@residuals/mod4@sigma.t)^2,lag=10,type='Ljung')
+
+```
+
+The Ljung-Box test statistic for the standardized residuals is Q(10) = 17.892 with p-value 0.05681, which although does pass the "Fisher's 5%", may still not be enough to satisfy skeptics. Meanwhile, the test statistic for the squared standardized residuals is Q(10) = 10.779 with p-value of 0.375.
+
+## 7. Fitted Model Equations
+
+The breakdown of full models from above is as follows:
+
+1.  Models with Gaussian innovations:
+    a.  ARMA(2,0) + GARCH(1,1)
+
+        $$r_t = 6.463 \cdot 10^{-4} + a_t$$
+        $$σ^2_t = 1.590 \cdot 10^{-6} + 9.486 \cdot 10^{-2} a_{t-1}^2 + 0.8902 σ_{t-1}^2$$
+
+    b.  ARMA(0,0) + GARCH(1,1)
+
+        $$rt = 6.334 \cdot 10^{-4} + a_t$$
+        $$σ^2_t = 1.598 \cdot 10^{-6} + 9.529 \cdot 10^{-2} a_{t-1}^2 + 0.8897 σ_{t-1}^2$$
+2.  Models with Student's t innovations:
+    a.  ARMA(2,0) + GARCH(1,1)
+
+        $$r_t = 7.318 \cdot 10^{-4} - 2.682 \cdot 10^2 r_{t-1}^2 + a_t$$
+        $$σ^2_t = 1.000 \cdot 10^{-6} + 8.866 \cdot 10^{-2} a_{t-1}^2 + 0.9050 σ_{t-1}^2$$
+
+    b.  ARMA(1,0) + GARCH(1,1)
+
+        $$r_t = 7.192 \cdot 10^{-4} - 2.661 \cdot 10^2 r_{t-1}^2 + at$$
+        $$σ^2_t = 1.006 \cdot 10^{-6} + 8.899 \cdot 10^{-2} a_{t-1}^2 + 0.9046 σ_{t-1}^2$$
+
